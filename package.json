@@ -7,8 +7,8 @@
   "files": [
     "src",
     "skills",
-    "docs",
     "scripts",
+    "cordis.patch.yml",
     "README.md",
     "README.zh.md"
   ],
@@ -29,8 +29,15 @@
       "patch": "cordis.patch.yml"
     }
   },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-tools": "*"
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.8"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true },
+    "@deepseek-ai/dsh-tools": { "optional": true }
   }
 }

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  canary:
+    name: canary (packed bundle + tool surface)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install deps
+        run: npm ci
+      - name: Run canary
+        # Packs the plugin, extracts the tarball, loads the packed artifact,
+        # asserts bundle completeness + 7 tools + stdout/exit/timeout/abort +
+        # argv safety + whitelist + value-domain guard + clock guard (40 checks).
+        run: node scripts/canary.mjs
+
+  quoting:
+    name: bash quoting + injection audits
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install deps
+        run: npm ci
+      - name: Real-bash quoting suite
+        run: node scripts/test-quoting-bash.mjs
+        env:
+          BASH_PATH: /usr/bin/bash
+      - name: Injection audit (7 payloads)
+        run: node scripts/audit-injection.mjs
+        env:
+          BASH_PATH: /usr/bin/bash
+      - name: Control-char audit (7 payloads)
+        run: node scripts/audit-control-chars.mjs
+        env:
+          BASH_PATH: /usr/bin/bash
+
+  engine:
+    name: engine parity (SkillOpt suite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install engine
+        run: pip install skillopt
+      - name: Engine smoke (real status through sleep.py)
+        run: |
+          python scripts/sleep.py status
+          python -m skillopt_sleep status || true

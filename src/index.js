@@ -8,8 +8,17 @@
 
 import Schema from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 export const name = 'skillopt'
+
+// Plugin directory (absolute) — used to resolve the bundled engine script so
+// it works regardless of the dsh process cwd.
+const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url)) + '/..'
+
+// Exported for the canary test (scripts/canary.mjs).
+export { buildArgv, quoteArgv }
 
 // Wait for the tool registry and the shell executor before applying.
 export const inject = ['tools', 'shell']
@@ -21,10 +30,11 @@ export const inject = ['tools', 'shell']
 export const Config = Schema.object({
   pythonCmd: Schema.string()
     .default('python')
-    .description('Python interpreter used to run the skillopt_sleep engine'),
+    .description('Python interpreter used to run the engine bootstrap (scripts/sleep.py)'),
   module: Schema.string()
-    .default('skillopt_sleep')
-    .description('Python module that implements the skillopt-sleep CLI'),
+    .description('Override: run `python -m <module>` directly instead of the bootstrap script'),
+  engineScript: Schema.string()
+    .description('Override: path to the engine bootstrap script (default: scripts/sleep.py)'),
   project: Schema.string()
     .description('Default project directory for sleep cycles'),
   scope: Schema.union(['all', 'invoked']).description('Harvest scope'),
@@ -41,43 +51,165 @@ export const Config = Schema.object({
   editBudget: Schema.number().description('Max bounded edits per cycle (default 4)'),
   preferences: Schema.string().description('House rules injected into the reflection prior'),
   jsonOutput: Schema.boolean().default(false).description('Emit machine-readable JSON where supported'),
+  autoAdopt: Schema.boolean()
+    .default(false)
+    .description('OPERATOR-ONLY: auto-adopt a passed proposal without asking. The model cannot toggle this; set it in cordis.yml.'),
   timeoutMs: Schema.number()
     .default(600_000)
     .description('Per-call engine timeout in milliseconds (default 10 min)'),
+  unscheduleAll: Schema.boolean()
+    .default(false)
+    .description('OPERATOR-ONLY: allow skillopt_unschedule to remove every managed entry (--all). The model cannot set this.'),
 })
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function buildCommand(config, action, explicit = {}, extras = []) {
-  const python = config.pythonCmd || 'python'
-  const module = config.module || 'skillopt_sleep'
-  const parts = [python, '-m', module, action]
+// Quote one argv element for a POSIX shell (bash). Single quotes are literal;
+// an embedded single quote is expressed as '\'' (close quote, escaped quote,
+// reopen quote) — the only portable POSIX spelling. PowerShell is not a target
+// here: dsh's ctx.shell executes via `bash -c` (LocalBashExecutor), so the
+// quoting only needs to be bash-correct.
+//
+// Control characters are stripped as defense in depth: \r and \r\n inside a
+// single-quoted word would otherwise split the value into multiple argv words
+// (broken command, not RCE — quotes never execute), and \n would corrupt the
+// engine's own arg parsing. Model-controlled values must arrive as exactly
+// one argument.
+function q(value) {
+  const s = String(value).replace(/[\r\n\u0000-\u001f\u007f]/g, ' ')
+  return `'${s.replace(/'/g, "'\\''")}'`
+}
+
+/**
+ * Build the argv array for the engine with config defaults and per-call
+ * overrides. Returns an ARRAY (not a joined string); execute() quotes each
+ * element and lets shell.resolve() apply workdir/output-cap/sandbox defaults.
+ *
+ * The engine is invoked through scripts/sleep.py, which mirrors the official
+ * SkillOpt runner: it resolves a source checkout (repo root), picks a
+ * Python >= 3.10, and falls back to the `skillopt-sleep` CLI or an installed
+ * package. `config.module` still works as a direct `python -m <module>` escape
+ * hatch for users who prefer it.
+ */
+function buildArgv(config, action, explicit = {}, extras = [], allowed = null) {
+  const parts = [config.pythonCmd || 'python']
+  if (config.module) {
+    // explicit escape hatch: python -m <module>
+    parts.push('-m', config.module)
+  } else {
+    // default: the bundled bootstrap mirrors the official runner; resolve it
+    // absolutely so it works no matter what cwd dsh was started from.
+    parts.push(config.engineScript || join(PLUGIN_DIR, 'scripts', 'sleep.py'))
+  }
+  parts.push(action)
   const push = (flag, value) => {
     if (value !== undefined && value !== null && value !== '') parts.push(flag, String(value))
   }
-  if (explicit.project !== undefined) push('--project', explicit.project)
-  else push('--project', config.project)
-  if (explicit.scope !== undefined) push('--scope', explicit.scope)
-  else push('--scope', config.scope)
-  if (explicit.source !== undefined) push('--source', explicit.source)
-  else push('--source', config.source)
-  if (explicit.backend !== undefined) push('--backend', explicit.backend)
-  else push('--backend', config.backend)
-  if (explicit.model !== undefined) push('--model', explicit.model)
-  else push('--model', config.model)
-  if (explicit.maxTasks !== undefined) push('--max-tasks', explicit.maxTasks)
-  else push('--max-tasks', config.maxTasks)
-  if (explicit.maxSessions !== undefined) push('--max-sessions', explicit.maxSessions)
-  else push('--max-sessions', config.maxSessions)
-  if (explicit.editBudget !== undefined) push('--edit-budget', explicit.editBudget)
-  else push('--edit-budget', config.editBudget)
-  if (explicit.preferences !== undefined) push('--preferences', explicit.preferences)
-  else push('--preferences', config.preferences)
-  if (config.jsonOutput || explicit.json) parts.push('--json')
+  const has = (v) => v !== undefined && v !== null && v !== ''
+  // `allowed` is the tool's declared parameter set (null = everything, the
+  // pre-whitelist behavior). Both the model-supplied value AND the operator
+  // config default are gated on it, so a tool like skillopt_adopt (declares
+  // only `project`) never receives --backend/--model/--json/… from either
+  // source — the config default must not leak into tools that do not declare
+  // the key.
+  const permits = (key) => !allowed || allowed.includes(key)
+  const withDefault = (key, flag) => {
+    if (!permits(key)) return
+    if (has(explicit[key])) push(flag, explicit[key])
+    else push(flag, config[key])
+  }
+  withDefault('project', '--project')
+  withDefault('scope', '--scope')
+  withDefault('source', '--source')
+  withDefault('backend', '--backend')
+  withDefault('model', '--model')
+  withDefault('maxTasks', '--max-tasks')
+  withDefault('maxSessions', '--max-sessions')
+  withDefault('editBudget', '--edit-budget')
+  withDefault('preferences', '--preferences')
+  if (permits('json') && (config.jsonOutput || explicit.json)) parts.push('--json')
   parts.push(...extras)
-  return parts.join(' ')
+  return parts
+}
+
+/** Join argv with safe quoting for the platform shell. */
+function quoteArgv(argv) {
+  return argv.map(q).join(' ')
+}
+
+// Pick exactly the parameters a tool declares. dsh's parameter schema does
+// not reject undeclared properties by default (no additionalProperties:false),
+// so without this filter the model could inject fields (backend, model, json,
+// editBudget, …) that buildArgv would forward to the engine — crossing the
+// per-tool surface and, for skillopt_adopt, the live-change boundary. Each
+// tool's build() must pass through exactly its declared keys.
+function pick(obj, keys) {
+  const out = {}
+  for (const key of keys) {
+    if (obj[key] !== undefined) out[key] = obj[key]
+  }
+  return out
+}
+
+// Value-domain guard for model-supplied path-like strings.
+//
+// argv-level quoting (quoteArgv) protects the dsh `bash -c` boundary, but the
+// engine re-interpolates these values into its OWN shell/command strings:
+// scheduler.py builds `--project "{project}"` inside a crontab line and a
+// Windows run.cmd executed by schtasks, and write_tasks_file() turns an
+// arbitrary `output` into a file write (abspath + makedirs + overwrite). A
+// model-controlled value containing `"`, `&`, `;`, `|`, `$`, backticks or
+// other shell metacharacters would break out of that splice and execute as a
+// separate command under the scheduler's shell, or overwrite an arbitrary
+// file. Legitimate paths contain letters, digits, spaces, and `- _ . / \ :`
+// only — reject everything else up front.
+const UNSAFE_PATH = /["'&;|$`<>()\[\]{}*\u0000-\u001f\u007f]/
+
+/** Throws on a path-like value carrying shell metacharacters. */
+function assertSafePath(value, what) {
+  if (value === undefined || value === null || value === '') return
+  if (UNSAFE_PATH.test(String(value))) {
+    throw new Error(
+      `[skillopt] ${what} rejected: contains shell metacharacters (` +
+      `" ' & ; | $ \` < > ( ) [ ] { } * or control chars). ` +
+      `Use a plain directory/file path.`,
+    )
+  }
+}
+
+/**
+ * Reject an output path that could write outside the working area:
+ * absolute paths and `..` traversal are refused; only a bare relative
+ * file name (or a simple relative path) is accepted.
+ */
+function assertSafeOutput(value) {
+  if (value === undefined || value === null || value === '') return
+  const s = String(value)
+  assertSafePath(s, 'output path')
+  if (s.startsWith('/') || s.startsWith('\\') || /^[A-Za-z]:[\\/]/.test(s) || s.includes('..')) {
+    throw new Error(
+      `[skillopt] output path rejected: absolute paths and ".." traversal are not allowed; ` +
+      `give a relative file name (e.g. "tasks.json").`,
+    )
+  }
+}
+
+/**
+ * Range guard for schedule's clock parameters. The engine does not validate
+ * hour/minute itself and splices them straight into a crontab line and a
+ * schtasks start time; an out-of-range value (99, -1, …) would create a
+ * broken scheduled-task entry. Reject anything outside the real clock.
+ */
+function assertSafeClock(value, what, min, max) {
+  if (value === undefined || value === null || value === '') return
+  const n = Number(value)
+  if (!Number.isInteger(n) || n < min || n > max) {
+    throw new Error(
+      `[skillopt] ${what} rejected: must be an integer in [${min}, ${max}], got ${JSON.stringify(value)}.`,
+    )
+  }
 }
 
 function renderOutput(_args, value) {
@@ -100,7 +232,7 @@ export function apply(ctx, config = {}) {
         project: { type: 'string', description: 'Project directory (defaults to config.project or cwd)' },
         json: { type: 'boolean', description: 'Emit machine-readable JSON' },
       },
-      build: (a) => buildCommand(config, 'status', a),
+      build: (a) => buildArgv(config, 'status', pick(a, ['project', 'json']), [], ['project', 'json']),
     },
     {
       name: 'skillopt_dry_run',
@@ -114,7 +246,7 @@ export function apply(ctx, config = {}) {
         maxTasks: { type: 'number', description: 'Cap mined tasks (default 40)' },
         progress: { type: 'boolean', description: 'Print phase progress to stderr' },
       },
-      build: (a) => buildCommand(config, 'dry-run', a, a.progress ? ['--progress'] : []),
+      build: (a) => buildArgv(config, 'dry-run', pick(a, ['project', 'source', 'backend', 'model', 'maxTasks']), a.progress ? ['--progress'] : [], ['project', 'source', 'backend', 'model', 'maxTasks']),
     },
     {
       name: 'skillopt_run',
@@ -125,14 +257,14 @@ export function apply(ctx, config = {}) {
         backend: { type: 'string', description: 'Backend for model calls' },
         source: { type: 'string', description: 'Transcript source' },
         preferences: { type: 'string', description: 'House rules for the reflection prior' },
-        autoAdopt: { type: 'boolean', description: 'Auto-adopt if the gate passes' },
         progress: { type: 'boolean', description: 'Print phase progress to stderr' },
       },
       build: (a) => {
         const extra = []
-        if (a.autoAdopt) extra.push('--auto-adopt')
+        // auto-adopt is OPERATOR-ONLY (config.autoAdopt); the model cannot set it.
+        if (config.autoAdopt) extra.push('--auto-adopt')
         if (a.progress) extra.push('--progress')
-        return buildCommand(config, 'run', a, extra)
+        return buildArgv(config, 'run', pick(a, ['project', 'backend', 'source', 'preferences']), extra, ['project', 'backend', 'source', 'preferences'])
       },
     },
     {
@@ -142,7 +274,7 @@ export function apply(ctx, config = {}) {
       parameters: {
         project: { type: 'string', description: 'Project directory' },
       },
-      build: (a) => buildCommand(config, 'adopt', a),
+      build: (a) => buildArgv(config, 'adopt', pick(a, ['project']), [], ['project']),
     },
     {
       name: 'skillopt_harvest',
@@ -157,7 +289,7 @@ export function apply(ctx, config = {}) {
       build: (a) => {
         const extra = []
         if (a.output) extra.push('--output', a.output)
-        return buildCommand(config, 'harvest', a, extra)
+        return buildArgv(config, 'harvest', pick(a, ['project', 'source', 'maxTasks']), extra, ['project', 'source', 'maxTasks'])
       },
     },
     {
@@ -174,7 +306,7 @@ export function apply(ctx, config = {}) {
         const extra = []
         if (a.hour !== undefined) extra.push('--hour', String(a.hour))
         if (a.minute !== undefined) extra.push('--minute', String(a.minute))
-        return buildCommand(config, 'schedule', a, extra)
+        return buildArgv(config, 'schedule', pick(a, ['project', 'backend']), extra, ['project', 'backend'])
       },
     },
     {
@@ -183,9 +315,8 @@ export function apply(ctx, config = {}) {
         'Remove the nightly cron entry for this project.',
       parameters: {
         project: { type: 'string', description: 'Project directory' },
-        all: { type: 'boolean', description: 'Remove every managed entry' },
       },
-      build: (a) => buildCommand(config, 'unschedule', a, a.all ? ['--all'] : []),
+      build: (a) => buildArgv(config, 'unschedule', pick(a, ['project']), config.unscheduleAll ? ['--all'] : [], ['project']),
     },
   ]
 
@@ -197,20 +328,59 @@ export function apply(ctx, config = {}) {
         parameters: t.parameters,
         output: { schema: { type: 'string' }, render: renderOutput },
         async execute(args, exec) {
-          const command = t.build(args || {})
+          const a = args || {}
+          // Value-domain guard BEFORE building argv: project paths reach the
+          // engine's own shell/crontab/schtasks string interpolation and the
+          // filesystem; output writes a file. Model-controlled values with
+          // shell metacharacters (or output escaping the working area) are
+          // rejected here, never forwarded.
           try {
-            const result = await shell.run({
-              command,
-              timeoutMs: config.timeoutMs,
-              signal: exec?.signal,
-            })
-            const status = result?.exitCode ?? 'signal'
-            const stdout = typeof result?.stdout === 'string' ? result.stdout : ''
-            const stderr = typeof result?.stderr === 'string' ? result.stderr : ''
+            assertSafePath(a.project, 'project')
+            assertSafeOutput(a.output)
+            // schedule clock params: the engine splices them into crontab /
+            // schtasks verbatim, so keep them inside the real clock range.
+            assertSafeClock(a.hour, 'hour', 0, 23)
+            assertSafeClock(a.minute, 'minute', 0, 59)
+          } catch (err) {
+            return `[skillopt ${t.name}] ${err.message}`
+          }
+          const argv = t.build(a)
+          // `command` must be the shell-quoted form for the platform executor;
+          // resolve() applies the executor's workdir/output-cap/sandbox defaults.
+          const request = {
+            command: quoteArgv(argv),
+            timeoutMs: config.timeoutMs,
+            signal: exec?.signal,
+          }
+          const spec = typeof shell.resolve === 'function' ? shell.resolve(request) : request
+          try {
+            const result = await shell.run(spec)
+            // Distinguish the executor's timeout (timedOut: true, exitCode null)
+            // from an abort/kill (exitCode null, no timedOut) so the marker is
+            // honest instead of lumping both under "signal".
+            const status = result?.timedOut
+              ? 'timeout'
+              : (result?.exitCode ?? 'signal')
+            // rc.8 returns stdout/stderr as CollectedOutput { text, truncated, spillPath }
+            const fmt = (co) => {
+              if (co === undefined || co === null) return ''
+              if (typeof co === 'string') return co
+              const parts = []
+              if (co.text) parts.push(co.text)
+              if (co.truncated) {
+                parts.push(`[truncated${co.spillPath ? ` — full output at ${co.spillPath}` : ''}]`)
+              }
+              return parts.join('\n')
+            }
+            const stdout = fmt(result?.stdout)
+            const stderr = fmt(result?.stderr)
             const tail = [stdout, stderr].filter(Boolean).join('\n').trim()
+            // Do NOT slice here: fmt() already carries the executor's truncation
+            // marker + spill path when output was capped. A second slice would
+            // hide data the executor already bounded and contradict the marker.
             return [
               `[skillopt ${t.name}] exit=${status}`,
-              tail ? tail.slice(0, 60_000) : '(no output)',
+              tail ? tail : '(no output)',
             ].join('\n')
           } catch (err) {
             return `[skillopt ${t.name}] engine call failed: ${err?.message || String(err)}`
