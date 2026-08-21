@@ -147,7 +147,12 @@ function buildArgv(config, action, explicit = {}, extras = [], allowed = null) {
 
 /** Join argv with safe quoting for the platform shell. */
 function quoteArgv(argv) {
-  return argv.map(q).join(' ')
+  const quoted = argv.map(q).join(' ')
+  // Windows PowerShell: a bare string is not a command invocation — `'python'
+  // 'args'` parses as a string-array expression and errors. Prepend the `&`
+  // call operator so the quoted argv runs as a command (same as bash, where
+  // the quote is the whole word and the first word is the command).
+  return IS_WINDOWS ? `& ${quoted}` : quoted
 }
 
 // Pick exactly the parameters a tool declares. dsh's parameter schema does

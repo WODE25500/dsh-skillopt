@@ -27,7 +27,8 @@ function expandArgs(quoted) {
     ].filter(Boolean)
     const shell = candidates.find((p) => existsSync(p))
     if (!shell) throw new Error('no PowerShell executable found for control-char audit')
-    const script = `Write-Output ${quoted} | ForEach-Object { "[$_]" }`
+    const args = quoted.replace(/^& /, '')
+    const script = `Write-Output ${args} | ForEach-Object { "[$_]" }`
     const out = execFileSync(shell, ['-NoProfile', '-Command', script], { encoding: 'utf8' })
     // PowerShell emits CRLF; strip \r before slicing the [..] markers.
     return out.trim().split('\n').map((l) => l.replace(/\r$/, '').slice(1, -1))

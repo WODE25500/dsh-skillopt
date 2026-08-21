@@ -33,7 +33,11 @@ function expandArgs(quoted) {
     ].filter(Boolean)
     const shell = candidates.find((p) => existsSync(p))
     if (!shell) throw new Error('no PowerShell executable found for injection audit')
-    const script = `Write-Output ${quoted} | ForEach-Object { "[$_]" }`
+    // quoteArgv now prepends "& " (the PS call operator) on win32. Strip it
+    // before echoing the argument array; PowerShell would reject `&` in the
+    // middle of a pipeline expression.
+    const args = quoted.replace(/^& /, '')
+    const script = `Write-Output ${args} | ForEach-Object { "[$_]" }`
     const out = execFileSync(shell, ['-NoProfile', '-Command', script], { encoding: 'utf8' })
     // PowerShell emits CRLF; strip \r before slicing the [..] markers.
     return out.trim().split('\n').map((l) => l.replace(/\r$/, '').slice(1, -1))
