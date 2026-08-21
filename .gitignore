@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .skillopt-sleep/
 staging/
+_msg.txt
