@@ -44,7 +44,8 @@ integrations, wired into dsh as native tools plus a bundled skill.
 
 ## Prerequisites
 
-- DeepSeek Harness (dsh) installed
+- DeepSeek Harness (dsh) installed — dsh 0.1.x and 0.2.x are supported
+  (`@deepseek-ai/dsh-tools` 0.1.1-rc.2, 0.2.0-rc.2)
 - Python 3.10+ with the SkillOpt-Sleep engine:
 
 ```bash

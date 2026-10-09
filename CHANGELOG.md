@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 (2026-10-09)
+
+- Support the dsh 0.2 line: the `@deepseek-ai/dsh-tools` range now covers
+  `0.2.0-rc.1`-`<0.3.0` in addition to the previous `0.1.1-rc.2`-`<0.2.0`.
+  The tool surface is unchanged (`defineTool` is identical in both lines); the
+  packed canary (40 checks) passes against `dsh-tools` 0.2.0-rc.2, the version
+  `@deepseek-ai/dsh` 0.2.0-rc.2 ships. `0.2.1-alpha.*` stays out of range: that
+  line pairs with a prerelease `cordis`, which the plugin does not claim yet.
+
 ## 0.2.0 (2026-08-21)
 
 - Security: per-tool parameter whitelist (undeclared args cannot reach the engine).

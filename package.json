@@ -1,6 +1,6 @@
 {
   "name": "dsh-skillopt",
-  "version": "0.1.1",
+  "version": "0.2.1",
   "description": "Microsoft SkillOpt-Sleep integration for DeepSeek Harness: give your dsh agent a nightly sleep cycle that harvests past sessions, replays recurring tasks, and consolidates validated skills behind a held-out gate.",
   "type": "module",
   "main": "src/index.js",
@@ -30,7 +30,7 @@
     }
   },
   "dependencies": {
-    "@deepseek-ai/dsh-tools": ">=0.1.1-rc.2 <0.2.0",
+    "@deepseek-ai/dsh-tools": ">=0.1.1-rc.2 <0.2.0 || >=0.2.0-rc.1 <0.3.0",
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "peerDependencies": {
