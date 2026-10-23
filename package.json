@@ -24,6 +24,7 @@
     "sleep"
   ],
   "license": "MIT",
+  "repository": {"type": "git", "url": "git+https://github.com/WODE25500/dsh-skillopt.git"},
   "dsh": {
     "bundle": {
       "patch": "cordis.patch.yml"
