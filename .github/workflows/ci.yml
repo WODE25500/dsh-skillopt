@@ -17,6 +17,8 @@ jobs:
           cache: npm
       - name: Install deps
         run: npm ci
+      - name: Run shell seam compatibility test
+        run: npm run test:shell-seam
       - name: Run canary
         # Packs the plugin, extracts the tarball, loads the packed artifact,
         # asserts bundle completeness + 7 tools + stdout/exit/timeout/abort +
